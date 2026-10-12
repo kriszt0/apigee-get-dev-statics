@@ -17,7 +17,7 @@ from xml.sax.saxutils import escape
 
 DEFAULT_HOST = '/opt/apigee/var/run/apigee-postgresql'
 HEADERS = ['api_product', 'apiproxy', 'developer_app',
-           'message_count', 'is_error', 'error_rate_percent']
+           'message_count', 'error_count', 'error_rate_percent']
 MAX_EXCEL_ROWS = 1048576
 
 def xml_text(value):
@@ -58,22 +58,18 @@ def allowed_table(name):
     return name
 
 def query_for_period(table, period_start, period_end, label):
-    # Keep is_error=0/1 as separate rows, but calculate the error rate for
-    # the full product+proxy+app combination (rather than 0/100 per row).
+    # Exactly one result for each product + proxy + app within the period.
+    # is_error is aggregated, not included in GROUP BY.
     return ("COPY ("
-            "WITH grouped AS ("
-            "SELECT api_product, apiproxy, developer_app, is_error, "
-            "SUM(COALESCE(message_count,0)) AS message_count "
+            "SELECT api_product, apiproxy, developer_app, "
+            "SUM(COALESCE(message_count,0)) AS message_count, "
+            "SUM(CASE WHEN is_error = 1 THEN COALESCE(message_count,0) ELSE 0 END) AS error_count, "
+            "ROUND(100.0 * SUM(CASE WHEN is_error = 1 THEN COALESCE(message_count,0) ELSE 0 END) "
+            "/ NULLIF(SUM(COALESCE(message_count,0)),0), 2) AS error_rate_percent "
             "FROM %s WHERE client_received_start_timestamp >= TIMESTAMP '%s' "
             "AND client_received_start_timestamp < TIMESTAMP '%s' "
-            "GROUP BY api_product, apiproxy, developer_app, is_error) "
-            "SELECT api_product, apiproxy, developer_app, message_count, is_error, "
-            "ROUND(100.0 * SUM(CASE WHEN is_error = 1 THEN message_count ELSE 0 END) "
-            "OVER (PARTITION BY api_product, apiproxy, developer_app) / "
-            "NULLIF(SUM(message_count) OVER "
-            "(PARTITION BY api_product, apiproxy, developer_app),0), 2) "
-            "AS error_rate_percent "
-            "FROM grouped ORDER BY message_count DESC, api_product, apiproxy, developer_app, is_error"
+            "GROUP BY api_product, apiproxy, developer_app "
+            "ORDER BY message_count DESC, api_product, apiproxy, developer_app"
             ") TO STDOUT WITH (FORMAT CSV, HEADER TRUE)") % (
                 table, period_start.strftime('%Y-%m-%d %H:%M:%S'),
                 period_end.strftime('%Y-%m-%d %H:%M:%S'))
@@ -213,7 +209,7 @@ def build(opts):
             z.writestr('xl/styles.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF17365D"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>')
         os.rename(tmp_path, opts.output)
         print('Ready: %s' % os.path.abspath(opts.output))
-        print('Note: error_rate_percent is computed per API product/proxy/app across both is_error statuses.')
+        print('Note: one row per API product/proxy/app per sheet; error_count is included in message_count.')
     except Exception:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
